@@ -17,6 +17,9 @@ except ImportError:
 
 logging_format = "%(asctime)s: %(message)s"
 logging.basicConfig(format=logging_format, level=logging.INFO, datefmt="%H:%M:%S")
+#logging.getLogger().setLevel(logging.DEBUG) # to toggle debug logging
+
+#logging.debug(<message>) # place throughout code to print messages to command line
 
 reset_mcu()
 time.sleep(0.2)
