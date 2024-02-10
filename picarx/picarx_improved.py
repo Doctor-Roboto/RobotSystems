@@ -1,12 +1,10 @@
-import logging
+#!/usr/bin/env python3
 import time
 import os
 import math
-
-logging_format = "%(asctime)s: %(message)s"
-logging.basicConfig(format=logging_format, level=logging.INFO,
-datefmt="%H:%M:%S")
-logging.getLogger().setLevel(logging.DEBUG)
+import logging
+#from logdecorator import log_on_start, log_on_end, log_on_error
+import atexit
 
 try:
     from robot_hat import Pin, ADC, PWM, Servo, fileDB
@@ -16,11 +14,12 @@ except ImportError:
     from sim_robot_hat import Pin, ADC, PWM, Servo, fileDB
     from sim_robot_hat import Grayscale_Module, Ultrasonic
     from sim_robot_hat import reset_mcu, run_command
-import logging
-import atexit
+
+logging_format = "%(asctime)s: %(message)s"
+logging.basicConfig(format=logging_format, level=logging.INFO, datefmt="%H:%M:%S")
+
 reset_mcu()
 time.sleep(0.2)
-
 
 
 def constrain(x, min_val, max_val):
@@ -61,7 +60,6 @@ class Picarx(object):
 
         # reset robot_hat
         reset_mcu()
-        logging.debug("utils funtion working")
         time.sleep(0.2)
 
         # --------- config_flie ---------
@@ -111,6 +109,10 @@ class Picarx(object):
         # --------- ultrasonic init ---------
         tring, echo= ultrasonic_pins
         self.ultrasonic = Ultrasonic(Pin(tring), Pin(echo))
+
+        # --------- Register stop function per 2.7.1 ---------
+        self.stop()
+        atexit.register(self.stop)
         
     def set_motor_speed(self, motor, speed):
         ''' set motor speed
@@ -128,7 +130,7 @@ class Picarx(object):
             direction = -1 * self.cali_dir_value[motor]
         speed = abs(speed)
         if speed != 0:
-            speed = int(speed /2 ) + 50
+            speed = int(speed /2 ) # + 50 # TODO - is this the speed scaling factor?
         speed = speed - self.cali_speed_value[motor]
         if direction < 0:
             self.motor_direction_pins[motor].high()
@@ -148,7 +150,6 @@ class Picarx(object):
 
     def motor_direction_calibrate(self, motor, value):
         ''' set motor direction calibration value
-        
         param motor: motor index, 1 means left motor, 2 means right motor
         type motor: int
         param value: speed
@@ -193,13 +194,24 @@ class Picarx(object):
         self.set_motor_speed(1, speed)
         self.set_motor_speed(2, speed)
 
+    def ackerman_scale_from_angle(self, angle):
+        speed_mod = math.cos(math.radians(angle))
+        return speed_mod
+    
+    def get_speed_command_from_angle(self, angle):
+        sin_angle = 100 * abs(int(math.sin(math.radians(angle)))) # 0 angle = 0, 90 angle = 100
+        speed = 100 - sin_angle # higher angles = lower speeds
+        return max(speed, 20)
+
     def backward(self, speed):
         current_angle = self.dir_current_angle
         if current_angle != 0:
             abs_current_angle = abs(current_angle)
             if abs_current_angle > self.DIR_MAX:
                 abs_current_angle = self.DIR_MAX
-            power_scale = (100 - abs_current_angle) / 100.0 
+
+            power_scale = self.ackerman_scale_from_angle(abs_current_angle) #(100 - abs_current_angle) / 100.0 
+
             if (current_angle / abs_current_angle) > 0:
                 self.set_motor_speed(1, -1*speed)
                 self.set_motor_speed(2, speed * power_scale)
@@ -216,7 +228,9 @@ class Picarx(object):
             abs_current_angle = abs(current_angle)
             if abs_current_angle > self.DIR_MAX:
                 abs_current_angle = self.DIR_MAX
-            power_scale = (100 - abs_current_angle) / 100.0
+
+            power_scale = self.ackerman_scale_from_angle(abs_current_angle) #(100 - abs_current_angle) / 100.0 
+
             if (current_angle / abs_current_angle) > 0:
                 self.set_motor_speed(1, 1*speed * power_scale)
                 self.set_motor_speed(2, -speed) 
@@ -269,8 +283,24 @@ class Picarx(object):
         else:
             raise ValueError("grayscale reference must be a 1*3 list")
 
+
 if __name__ == "__main__":
     px = Picarx()
+
+    # Forward and backward in straight lines or with different steering angles
+    px.set_dir_servo_angle(45)
+'''
     px.forward(50)
     time.sleep(1)
     px.stop()
+
+    time.sleep(0.5)
+    px.set_dir_servo_angle(-45)
+
+    px.backward(50)
+    time.sleep(1)
+    px.stop()
+
+    px.set_dir_servo_angle(0)
+
+'''
