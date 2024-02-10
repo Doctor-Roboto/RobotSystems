@@ -1,164 +1,239 @@
-#!/usr/bin/python3
-
+#!/usr/bin/env python3
+from picarx_improved import Picarx, ADC, logging, constrain
 from time import sleep
-import picarx_improved as pc
-import bus
+import numpy as np
+from bus import Bus
 import concurrent.futures
 
-try:
-    from robot_hat import Pin, ADC, PWM, Servo, fileDB
-    from robot_hat import Grayscale_Module
-    from robot_hat.utils import reset_mcu
-except ImportError:
-    print('ImportError, using sim_robot_hat')
-    from sim_robot_hat import Pin, ADC, PWM, Servo, fileDB
-    from sim_robot_hat import Grayscale_Module
-    from sim_robot_hat import reset_mcu
+class Grayscale_Sensor(object):
+    LEFT = 0
+    """Left Channel"""
+    MIDDLE = 1
+    """Middle Channel"""
+    RIGHT = 2
+    """Right Channel"""
+    REFERENCE_DEFAULT = [1000]*3
 
-reset_mcu()
-sleep(0.2)
+    def __init__(self, pin0: ADC, pin1: ADC, pin2: ADC, reference: int = None):
+        """
+        Initialize Grayscale Module
 
-class sensor():
+        :param pin0: ADC object or int for channel 0
+        :type pin0: robot_hat.ADC/int
+        :param pin1: ADC object or int for channel 1
+        :type pin1: robot_hat.ADC/int
+        :param pin2: ADC object or int for channel 2
+        :type pin2: robot_hat.ADC/int
+        :param reference: reference voltage
+        :type reference: 1*3 list, [int, int, int]
+        """
+        self.pins = (pin0, pin1, pin2)
+        for i, pin in enumerate(self.pins):
+            if not isinstance(pin, ADC):
+                raise TypeError(f"pin{i} must be robot_hat.ADC")
+        self._reference = self.REFERENCE_DEFAULT
 
-    def __init__(self, grayscale_pins:list=['A0', 'A1', 'A2']):
-        # set up adc structures
-        self.adc0, self.adc1, self.adc2 = [ADC(pin) for pin in grayscale_pins]
-        #self.grayscale = Grayscale_Module(adc0, adc1, adc2, reference=None)
-        self.adc_value_list = []
+    def reference(self, ref: list = None) -> list:
+        """
+        Get Set reference value
 
-    def sensor_reading(self):
-        # poll the 3 ADC structures & compile ouputs into list
-        self.adc_value_list = []
-        self.adc_value_list.append(self.adc0.read())
-        self.adc_value_list.append(self.adc1.read())
-        self.adc_value_list.append(self.adc2.read())
-    
-    def producer(self, bus, delay):
+        :param ref: reference value, None to get reference value
+        :type ref: list
+        :return: reference value
+        :rtype: list
+        """
+        if ref is not None:
+            if isinstance(ref, list) and len(ref) == 3:
+                self._reference = ref
+            else:
+                raise TypeError("ref parameter must be 1*3 list.")
+        return self._reference
+
+    def read_status(self, datas: list = None) -> list:
+        """
+        Read line status
+
+        :param datas: list of grayscale datas, if None, read from sensor
+        :type datas: list
+        :return: list of line status, 0 for white, 1 for black
+        :rtype: list
+        """
+        if self._reference == None:
+            raise ValueError("Reference value is not set")
+        if datas == None:
+            datas = self.read()
+        return [0 if data > self._reference[i] else 1 for i, data in enumerate(datas)]
+
+    def read(self, channel: int = None) -> list:
+        """
+        read a channel or all datas
+
+        :param channel: channel to read, leave empty to read all. 0, 1, 2 or Grayscale_Module.LEFT, Grayscale_Module.CENTER, Grayscale_Module.RIGHT 
+        :type channel: int/None
+        :return: list of grayscale data
+        :rtype: list
+        """
+        if channel == None:
+            return [self.pins[i].read() for i in range(3)]
+        else:
+            return self.pins[channel].read()
+        
+    def producer(self, bus, delay = .01):
+        """ Grab sensor data and publish it at the rate we want """
         while True:
-            self.sensor_reading()
-            bus.write(self.adc_value_list)
-            #print('Sensed Vals:',self.adc_value_list)
+            bus.write(self.read())
             sleep(delay)
         
-
-class interpreter():
-
-    def __init__(self, sensitivity=0.1, polarity='d'):
-        # Take arguments for sensitivity (how different dark and light
-        # readings are expected to be) and polarity (whether line is 
-        # darker or lighter than floor)
-        self.sensitivity = sensitivity
-        self.polarity = polarity
-        self.running_avg = [[0.0,0.0,0.0],[0.0,0.0,0.0],[0.0,0.0,0.0]]
-        self.adjusted_readings = []
-
-    def process_reading(self, reading):
-        # Take input of same format as output of sensor method. Then,
-        # identify whether there is a sharp change between 2 adjacent
-        # sensor vals (edge), than using edge location & sign, determine
-        # whether system is left or right of centered, and magnitude of
-        # misalignment.
-
-        # Function should be robust to lighting conditions.
-        # Function should have option to have the "target" (line) darker
-        # or lighter than surrounding floor.
-        for i in range(3):
-            self.running_avg[i][0] = self.running_avg[i][1]
-            self.running_avg[i][1] = self.running_avg[i][2]
-            self.running_avg[i][2] = reading[i]
-        
-        averaged_rdgs = [sum(v)/3 for v in self.running_avg]        
-        min_v = min(averaged_rdgs)
-        max_v = max(averaged_rdgs)
-        norm_rdgs = [2*((v-min_v)/(max_v-min_v))-1 for v in averaged_rdgs]
-        
-        if self.polarity == 'l':
-            norm_rdgs = [(-1)*val for val in norm_rdgs]
-
-        self.adjusted_readings = norm_rdgs
-
-    def output(self):
-        # Return position of robot relative to line as a value on interval
-        # [-1,1], with positive values being left of robot.
-        if self.adjusted_readings == None: return 0
-        left = self.adjusted_readings[0]
-        mid = self.adjusted_readings[1]
-        right = self.adjusted_readings[2]
-
-        position = 0.0
-        magnitude = abs(left-right)
-
-        # If large difference between outside sensors, process steering
-        if magnitude > self.sensitivity:
-            left_diff = abs(mid - left)
-            right_diff = abs(mid - right)
-            # if a difference is small on left and left val > right val, steer left TODO - may not want >
-            if left_diff < right_diff and left > right:
-                # turn left
-                position = magnitude
-            elif left_diff < right_diff and left < right:
-                # turn right
-                position = -1*magnitude
-            elif left_diff > right_diff and left > right:
-                # turn left
-                position = magnitude
-            elif left_diff > right_diff and left < right:
-                # turn right
-                position = -1*magnitude
-
-        return position
     
-    def consumer_producer(self, read_bus, write_bus, delay):
-        while True:
-            reading = read_bus.read()
-            self.process_reading(reading)
-            position = self.output()
-            write_bus.write(position)
-            sleep(delay)
 
-class controller():
+class Interpreter():
+    """Interprets the greyscale sensor data and returns where the line is: 
+         robot relative to the line as a value on the interval [−1,1], with positive values being to the left of the robot."""
+    def __init__(self, light_sensitivity = 25, dark_sensitivity = 20, follow_dark_line = True):
+        self.dark = dark_sensitivity
+        self.light = light_sensitivity
+        self.polarity = follow_dark_line
+        self.counter = 0
+        
+        
+    def return_pos(self, greyscale_value = [0, 0, 0]):
+        
+        # First check if we have a least one value below the thresehold and one value above, or we failed
+        min_val = min(greyscale_value)
+        max_val = max(greyscale_value)
+        if not (min_val < self.dark) or not (max_val > self.light):
+            self.counter += 1
+            if self.counter > 20: 
 
-    def __init__(self, scaling_factor=30):
-        # take in an argument (with a default value) for the scaling factor
-        # between the interpreted offset from the line and the angle by which 
-        # to steer
-        self.scaling_factor = scaling_factor
-
-    def control(self, rel_pos=0.0):
-        # main control method should call the steering-servo method from your 
-        # car class so that it turns the car toward the line. It should also 
-        # return the commanded steering angle.
-        return int(rel_pos * self.scaling_factor)
-    
-    def consumer(self, bus, car, delay):
-        while True:
-            rel_pos = bus.read()
-            angle = self.control(rel_pos)
-            car.set_dir_servo_angle(angle)
-            print('Processed Val:', rel_pos,'| Commanded Angle:', angle)
-            sleep(delay)
+                logging.error(f"Min/max thresehold not hit - following failed.")
+                exit()
+            return 0
+        
+        self.counter = 0
             
-
-pol = str(input('Enter L (lighter) or D (darker) polarity: ')).lower()
-sense = sensor()
-interpret = interpreter(polarity=pol)
-control = controller()
-car = pc.Picarx()
-sense_bus = bus.bus()
-processed_bus = bus.bus()
-
-sense_delay = 0.1
-control_delay = 0.25
-
-car.forward(65)
-sleep(0.25)
-car.forward(55)
-
-with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
-    eSensor = executor.submit(sense.producer, sense_bus, sense_delay)
-    eInterpreter = executor.submit(interpret.consumer_producer, sense_bus, processed_bus, sense_delay)
-    eController = executor.submit(control.consumer, processed_bus, car, control_delay)
+        # Check if the min/max is in the middle
+        if self.polarity and greyscale_value.index(min(greyscale_value)) == 1:
+            # Dark line, and the darkest is in the middle
+            
+            # Line towards the center, but we will adjust towards side based on which one is greater
+            edges = [greyscale_value[0], greyscale_value[2]]
+            ratio = min(edges)/max(edges)
+            if greyscale_value[0] > greyscale_value[2]:
+                sign = 1
+            else: 
+                sign = -1
+            return sign * constrain(1 - ratio, -.5, .5)
+        elif not self.polarity and greyscale_value.index(max(greyscale_value)) == 1:
+            # light line, and the brightest is in the middle
+            
+            # Line towards the center, but we will adjust towards side based on which one is greater
+            edges = [greyscale_value[0], greyscale_value[2]]
+            ratio = min(edges)/max(edges)
+            if greyscale_value[0] > greyscale_value[2]:
+                sign = -1
+            else: 
+                sign = 1
+            return sign * constrain(1 - ratio, -.5, .5)
+        elif self.polarity and greyscale_value.index(min(greyscale_value)) == 2:
+            # Dark line, edge to right
+            
+            return greyscale_value[1]/greyscale_value[2]
+        
+        elif self.polarity and greyscale_value.index(min(greyscale_value)) == 0:
+            return -greyscale_value[1]/greyscale_value[0]
+        elif not self.polarity and greyscale_value.index(max(greyscale_value)) == 2:
+            # Dark line, edge to right
+            
+            return greyscale_value[1]/greyscale_value[2]
+        
+        elif not self.polarity and greyscale_value.index(max(greyscale_value)) == 0:
+            return -greyscale_value[1]/greyscale_value[0]
+        
+        
+    def interpreter(self, bus_greyscale, bus_line_pos, delay = .01):
+        """ Grabs data from greyscale bus, processes and outputs to the bus_line_pos """
+        try:
+            while True:
+                greyscale_data = bus_greyscale.read()
+                position = self.return_pos(greyscale_data)
+                bus_line_pos.write(position)
+                sleep(delay)
+        except: 
+            return
+            
+class Controller():
+    def __init__(self, picar: Picarx, scaling_factor = 15.0):
+        self.scale_factor = scaling_factor
+        self.picar = picar
+        
+    def update_angle(self, line_pos = 0.0):
+        scaled_val = self.scale_factor * line_pos
+        self.picar.set_dir_servo_angle(scaled_val)
+        return(scaled_val)
     
-eSensor.result()
-eInterpreter.result()
-eController.result()
+    def controller_consumer(self, bus_line_pos, delay = .01):
+        try:
+            while True:
+                
+                line_pos = bus_line_pos.read()
+                self.update_angle(line_pos)
+                logging.debug(f"New pos: {line_pos}")
+                sleep(.01)
+        except:
+            return
+
+def old_control():
+    # Set up picar class
+    picar = Picarx()
+    # Set up greyscale class for reading 
+    grey_sensor = Grayscale_Sensor(ADC(Grayscale_Sensor.LEFT), ADC(Grayscale_Sensor.MIDDLE), ADC(Grayscale_Sensor.RIGHT))
+    inter = Interpreter(40, 32, False) # was 25, 20
+    control = Controller(picar, 40)
+    avg_read = 0
+    reading = np.zeros((5,3))
+    picar.forward(24)
+    prev_angle = 0
+    try:
+        while True:
+            # Get three readings
+            for i in range(5):
+                sensor_read = grey_sensor.read()
+                reading[i, :] = sensor_read
+                
+            avg_reading = list(np.mean(reading, axis=0))
+            
+            logging.debug(f"Avg reading: {avg_reading}")
+            inter_val = inter.return_pos(avg_reading)
+            logging.debug(f"Line position: {inter_val}")
+            
+            control.update_angle((inter_val*1.5+prev_angle*.5)/2)
+            prev_angle = inter_val
+            sleep(.05)
+    except:
+        return
+    
+        
+    
+        
+if __name__ == "__main__":
+    picar = Picarx()
+    greyscale = Grayscale_Sensor(ADC(Grayscale_Sensor.LEFT), ADC(Grayscale_Sensor.MIDDLE), ADC(Grayscale_Sensor.RIGHT))
+    interp = Interpreter(40, 32, False)
+    control = Controller(picar, 40)
+    
+    # Create the buses
+    greyscale_bus = Bus()
+    line_pos_bus = Bus()
+    
+    sensor_delay = .05
+    interpreter_delay = .05
+    controller_delay = .1
+    picar.forward(30)
+    
+    with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
+        eSensor = executor.submit(greyscale.producer, greyscale_bus, sensor_delay)
+        sleep(.1)
+        eInterpreter = executor.submit(interp.interpreter,greyscale_bus, line_pos_bus, interpreter_delay)
+        sleep(.1)
+        eController = executor.submit(control.controller_consumer, line_pos_bus, controller_delay)
+    picar.stop()
