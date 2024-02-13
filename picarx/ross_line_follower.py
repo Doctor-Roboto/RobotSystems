@@ -1,5 +1,4 @@
-#! /usr/bin/python3
-import time
+#!/usr/bin/python3
 from time import sleep, time
 import picarx_improved as pc
 import rossros as rr
@@ -23,16 +22,15 @@ class gray_sensor():
         # set up adc structures
         self.adc0, self.adc1, self.adc2 = [ADC(pin) for pin in grayscale_pins]
         #self.grayscale = Grayscale_Module(adc0, adc1, adc2, reference=None)
-        self.adc_value_list = []
 
     def sensor_reading(self):
         # poll the 3 ADC structures & compile ouputs into list
-        self.adc_value_list = []
-        self.adc_value_list.append(self.adc0.read())
-        self.adc_value_list.append(self.adc1.read())
-        self.adc_value_list.append(self.adc2.read())
+        adc_value_list = []
+        adc_value_list.append(self.adc0.read())
+        adc_value_list.append(self.adc1.read())
+        adc_value_list.append(self.adc2.read())
         
-        return self.adc_value_list
+        return adc_value_list
 
 class gray_interpreter():
 
@@ -63,7 +61,13 @@ class gray_interpreter():
         averaged_rdgs = [sum(v)/3 for v in self.running_avg]        
         min_v = min(averaged_rdgs)
         max_v = max(averaged_rdgs)
-        norm_rdgs = [2*((v-min_v)/(max_v-min_v))-1 for v in averaged_rdgs]
+        
+        try:
+            norm_rdgs = [2*((v-min_v)/(max_v-min_v))-1 for v in averaged_rdgs]
+        except:
+            print('Norm error in grayscale interp')
+            norm_rdgs = [0.0, 0.0, 0.0]
+            
         if self.polarity == 'l':
             norm_rdgs = [(-1)*val for val in norm_rdgs]
             
@@ -123,7 +127,7 @@ class gray_controller():
         self.car.set_dir_servo_angle(val)
             
 class ultra_sensor():
-    def __init__(self, trig=Pin('D2'), echo=Pin('D3'), timeout=0.02):
+    def __init__(self, trig=Pin('D2'), echo=Pin('D3')):
         self.ultrasonic = Ultrasonic(trig, echo)
         
     def sensor_reading(self):
@@ -141,7 +145,6 @@ class ultra_interpreter():
         self.running_rdgs[1] = self.running_rdgs[2]
         self.running_rdgs[2] = reading
         avg_rdg = sum(self.running_rdgs) / 3
-        print('averaged rdgs:', avg_rdg)
         if avg_rdg > self.stop_dist:
             return True
         return False
@@ -155,7 +158,7 @@ class ultra_controller():
         if cmd:
             print('Forward')
             self.car.forward(self.speed+10)
-            sleep(0.1)
+            sleep(0.1) # TODO <- this a problem??
             self.car.forward(self.speed)
         else:
             print('Stop')
@@ -169,8 +172,8 @@ gray_sense = gray_sensor()
 gray_interpret = gray_interpreter(polarity=pol)
 steer_control = gray_controller(car=picar)
 ultra_sense = ultra_sensor()
-ultra_interpret = ultra_interpreter(stop_dist=10)
-drive_control = ultra_controller(car=picar, speed=60)
+ultra_interpret = ultra_interpreter(stop_dist=15)
+drive_control = ultra_controller(car=picar, speed=55)
 print('SIC functions defined')
 
 gr_sense_bus = rr.Bus(name="Greyscale bus")
@@ -180,10 +183,12 @@ ut_processed_bus = rr.Bus(name='Drive val bus')
 term_bus = rr.Bus(False, name="Termination bus")
 print('Busses defined')
 
-gr_sense_delay = 0.05
+gr_sense_delay = 0.01
 ut_sense_delay = 0.05
-interpret_delay = 0.05 # with running avg, we want to interpret as we sense
-control_delay = 0.3
+gr_interpret_delay = 0.1
+ut_interpret_delay = 0.15
+steer_delay = 0.25
+drive_delay = 0.25
 time_delay = 0.5
 RUN_TIME = 15
 
@@ -211,7 +216,7 @@ print('Producers defined')
 gr_interp = rr.ConsumerProducer(consumer_producer_function=gray_interpret.process_reading,
                              input_buses=gr_sense_bus,
                              output_buses=gr_processed_bus,
-                             delay=interpret_delay,
+                             delay=gr_interpret_delay,
                              termination_buses=term_bus
                              )
 prod_con_list.append(gr_interp)
@@ -220,7 +225,7 @@ print_list.append(gr_interp)
 ut_interp = rr.ConsumerProducer(consumer_producer_function=ultra_interpret.process_reading,
                              input_buses=ut_sense_bus,
                              output_buses=ut_processed_bus,
-                             delay=interpret_delay,
+                             delay=ut_interpret_delay,
                              termination_buses=term_bus
                              )
 prod_con_list.append(ut_interp)
@@ -230,7 +235,7 @@ print('Interpreters defined')
 
 gr_cons = rr.Consumer(consumer_function=steer_control.control,
                    input_buses=gr_processed_bus,
-                   delay=control_delay,
+                   delay=steer_delay,
                    termination_buses=term_bus
                    )
 prod_con_list.append(gr_cons)
@@ -238,7 +243,7 @@ print_list.append(gr_cons)
 
 ut_cons = rr.Consumer(consumer_function=drive_control.control,
                    input_buses=ut_processed_bus,
-                   delay=control_delay,
+                   delay=drive_delay,
                    termination_buses=term_bus
                    )
 prod_con_list.append(ut_cons)
